@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { sendText, sendTyping } from './whatsapp.js';
+import { sendText, sendTyping, wasSentByBot, wasRecentlySentBody } from './whatsapp.js';
 import { getHistory, appendTurn, isEscalated, setEscalated } from './store.js';
 import { SYSTEM_PROMPT } from './knowledge.js';
 
@@ -73,13 +73,54 @@ export async function handleInboundMessage(msg, contact) {
   }
 }
 
-// COEXISTENCE: staff replied from their phone. Flip the flag so the bot stops
-// talking on that thread. NOTE: verify the echo's recipient field against
-// Dualhook's actual payload — the customer's number may be `to`, `recipient_id`,
-// or nested. Log one real echo and adjust this line if needed.
+// Fields that might carry the message's origin. Logged only — see the note in
+// handleStaffEcho about why nothing branches on them yet.
+const SOURCE_KEYS = [
+  'source', 'origin', 'sent_by', 'sender_type', 'message_origin',
+  'from_me', 'is_echo', 'is_from_business', 'channel', 'device',
+];
+
+// COEXISTENCE: an echo means *someone* sent from the business number — either a
+// human in the WhatsApp Business app, or the bot itself via the API. Only the
+// human case should mute the bot on that thread.
+//
+// The business number is SHARED between the app and the API, so `from` is the
+// same either way and cannot distinguish them. What can: the send API returns
+// the wamid it assigned, and the echo replays that same wamid back, so an id
+// match against our own recent sends is an exact identity check.
 export async function handleStaffEcho(echo) {
+  // TEMPORARY — remove once we've seen a real payload in the Railway logs.
+  console.log(JSON.stringify(echo));
+
+  const id = echo.id || echo.message_id;
   const customer = echo.to || echo.recipient_id || echo.recipient?.wa_id;
+
+  // 1. Our own send, identified exactly by wamid. This is the bug fix: without
+  //    it the bot escalated on the echo of every reply it made and muted itself.
+  if (id && wasSentByBot(id)) {
+    console.log(`[echo] ${id} is our own API send — ignoring, no escalation`);
+    return;
+  }
+
+  // 2. Race guard: the echo webhook can arrive before the send response has been
+  //    parsed, so the wamid may not be recorded yet. Fall back to matching the
+  //    recipient + exact body against what we just sent.
+  const body = echo.text?.body;
+  if (customer && body && wasRecentlySentBody(customer, body)) {
+    console.log(`[echo] body matches a recent bot send to ${customer} — ignoring, no escalation`);
+    return;
+  }
+
+  // 3. Surface any origin-ish fields that actually exist, so one can be promoted
+  //    to the primary signal on the next pass. Deliberately NOT branched on yet:
+  //    these key names are guesses, and if a wrong guess classified a human reply
+  //    as bot-sent the bot would talk over staff — a worse failure than the one
+  //    being fixed. Paste a real echo from the logs and this becomes step 0.
+  const origin = {};
+  for (const k of SOURCE_KEYS) if (echo[k] !== undefined) origin[k] = echo[k];
+  if (Object.keys(origin).length) console.log('[echo] origin-ish fields present:', JSON.stringify(origin));
+
   if (!customer) { console.warn('[echo] no recipient found', JSON.stringify(echo)); return; }
   await setEscalated(customer, true);
-  console.log(`[echo] staff replied to ${customer} — bot muted on that thread`);
+  console.log(`[echo] human staff replied to ${customer} — bot muted on that thread`);
 }
