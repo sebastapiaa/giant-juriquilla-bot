@@ -1,9 +1,10 @@
-// Sends messages back through the Graph API. If Dualhook gives you a different
-// send endpoint/base URL, only this file changes.
-const GRAPH_VERSION = process.env.GRAPH_VERSION || 'v21.0';
+// Sends messages back through the Dualhook relay. If the relay gives you a
+// different send endpoint/base URL, only this file changes.
+const WA_API_HOST = process.env.WA_API_HOST || 'https://api.dualhook.com';
+const GRAPH_VERSION = process.env.GRAPH_VERSION || 'v25.0';
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
-const TOKEN = process.env.WHATSAPP_TOKEN; // permanent System User token
-const BASE = `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_NUMBER_ID}`;
+const TOKEN = process.env.WHATSAPP_TOKEN; // Dualhook dh_live_ key (outbound relay credential)
+const BASE = `${WA_API_HOST}/${GRAPH_VERSION}/${PHONE_NUMBER_ID}`;
 
 async function post(body) {
   const res = await fetch(`${BASE}/messages`, {
