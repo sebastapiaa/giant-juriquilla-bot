@@ -1,11 +1,20 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { sendText, sendTyping, wasSentByBot, wasRecentlySentBody } from './whatsapp.js';
-import { getHistory, appendTurn, isEscalated, setEscalated } from './store.js';
+import { getHistory, appendTurn, getEscalation, setEscalated } from './store.js';
 import { SYSTEM_PROMPT } from './knowledge.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
 const TZ = process.env.TIMEZONE || 'America/Mexico_City';
+
+// How long a thread stays muted after a human takes over. Set small (e.g.
+// 120000) in Railway to test the resume, then back to 2h. A non-numeric or
+// negative value falls back to the default rather than muting forever / never.
+const DEFAULT_ESCALATION_WINDOW_MS = 7_200_000; // 2h
+const rawWindow = Number(process.env.ESCALATION_WINDOW_MS);
+const ESCALATION_WINDOW_MS =
+  Number.isFinite(rawWindow) && rawWindow >= 0 ? rawWindow : DEFAULT_ESCALATION_WINDOW_MS;
+console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms`);
 
 // The model has NO clock. Compute the real date/time ourselves, in Querétaro's
 // timezone (the server runs in UTC), and inject it every message. Without this
@@ -38,8 +47,16 @@ export async function handleInboundMessage(msg, contact) {
   const from = msg.from;
   if (alreadyHandled(msg.id)) return;
 
-  // A human is handling this thread — stay quiet.
-  if (await isEscalated(from)) return;
+  // A human is handling this thread — stay quiet, but only for the escalation
+  // window. Once it lapses the bot picks the conversation back up by itself,
+  // instead of the thread staying muted until the 24h TTL.
+  const { escalated, escalatedAt } = await getEscalation(from);
+  if (escalated) {
+    const mutedFor = Date.now() - escalatedAt;
+    if (mutedFor < ESCALATION_WINDOW_MS) return;
+    await setEscalated(from, false);
+    console.log(`[handler] escalation window lapsed for ${from} after ${Math.round(mutedFor / 1000)}s — bot resuming`);
+  }
 
   // Only text for now; anything else goes to a person.
   if (msg.type !== 'text') {

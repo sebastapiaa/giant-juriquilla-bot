@@ -45,15 +45,40 @@ export async function appendTurn(waId, userText, assistantText) {
   await persist();
 }
 
+// Wipes the stored turns for one number, keeping the record (and its escalated
+// flag) intact. Returns whether there was anything to clear.
+export async function clearHistory(waId) {
+  const db = await load();
+  const c = db[waId];
+  if (!c || c.messages.length === 0) return false;
+  c.messages = [];
+  c.updatedAt = Date.now();
+  await persist();
+  return true;
+}
+
 export async function isEscalated(waId) {
   const db = await load();
   return Boolean(db[waId]?.escalated);
+}
+
+// Escalation state plus WHEN it started, so handler.js can auto-resume once the
+// escalation window lapses. escalatedAt is re-stamped on every escalation, so a
+// second staff reply restarts the clock from the human's latest message.
+export async function getEscalation(waId) {
+  const db = await load();
+  const c = db[waId];
+  if (!c?.escalated) return { escalated: false, escalatedAt: null };
+  // Threads escalated before escalatedAt existed fall back to updatedAt, which
+  // for an escalated record was stamped at escalation time.
+  return { escalated: true, escalatedAt: c.escalatedAt ?? c.updatedAt ?? 0 };
 }
 
 export async function setEscalated(waId, value) {
   const db = await load();
   db[waId] = db[waId] ?? { messages: [], updatedAt: Date.now() };
   db[waId].escalated = value;
+  db[waId].escalatedAt = value ? Date.now() : null;
   db[waId].updatedAt = Date.now();
   await persist();
 }

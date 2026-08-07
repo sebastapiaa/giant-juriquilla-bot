@@ -1,11 +1,14 @@
 import express from 'express';
 import crypto from 'crypto';
 import { handleInboundMessage, handleStaffEcho } from './handler.js';
+import { setEscalated, clearHistory } from './store.js';
 
 const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
-const { PORT = 3000, META_VERIFY_TOKEN, META_APP_SECRET } = process.env;
+const { PORT = 3000, META_VERIFY_TOKEN, META_APP_SECRET, ADMIN_KEY } = process.env;
+
+if (!ADMIN_KEY) console.warn('[admin] ADMIN_KEY unset — /admin/reset is disabled (404s)');
 
 // 1. Webhook verification — Meta/Dualhook calls this once when you save the URL
 app.get('/webhook', (req, res) => {
@@ -56,6 +59,34 @@ app.post('/webhook', (req, res) => {
     }
   } catch (err) {
     console.error('[webhook] parse error', err);
+  }
+});
+
+// ---- TEMPORARY TEST ENDPOINT — DELETE BEFORE LEAVING THIS RUNNING ----------
+// Un-mutes the bot on a thread and wipes that number's stored turns.
+// SET ADMIN_KEY IN RAILWAY. Without it this is fully open, and because it is a
+// GET anything that merely *follows a link* can fire it — crawler, browser
+// prefetch, link unfurl, CSRF from any page — on guessable wa_ids.
+// Remove it (and clearHistory in store.js, if unused) once testing is done.
+app.get('/admin/reset/:waid', async (req, res) => {
+  // 404 rather than 401: an unauthenticated caller learns nothing about whether
+  // this route exists.
+  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.sendStatus(404);
+
+  const waid = String(req.params.waid).replace(/^\+/, '');
+  // Keeps a stray URL from writing junk keys into the store — setEscalated
+  // creates a record for whatever string it is handed.
+  if (!/^\d{6,20}$/.test(waid)) {
+    return res.status(400).json({ ok: false, error: 'waid must be 6-20 digits' });
+  }
+  try {
+    await setEscalated(waid, false);
+    const historyCleared = await clearHistory(waid);
+    console.log(`[admin] reset ${waid} — unmuted, history ${historyCleared ? 'cleared' : 'already empty'}`);
+    res.json({ ok: true, waid, escalated: false, historyCleared });
+  } catch (err) {
+    console.error('[admin] reset failed', waid, err);
+    res.status(500).json({ ok: false, waid, error: err.message });
   }
 });
 
