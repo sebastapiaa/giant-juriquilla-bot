@@ -79,7 +79,28 @@ const FALLBACK = 'Perdón, tuve un problema técnico. Un miembro del equipo te c
 // waId -> { texts: [...everything they said while we waited], msgId }
 const held = new Map();
 
-export async function handleInboundMessage(msg, contact) {
+// One customer's messages must never process concurrently. WhatsApp delivers
+// several in a single webhook batch (a photo plus a PDF, say) and server.js
+// fires them off in parallel — so without this both read "not escalated"
+// before either writes it, and the customer gets two identical replies.
+// Each waId gets a promise chain; jobs queue behind the previous one.
+const chains = new Map(); // waId -> tail promise
+
+function serialize(waId, job) {
+  const prev = chains.get(waId) || Promise.resolve();
+  const run = prev.then(job, job); // run even if the previous job rejected
+  const tail = run.catch(() => {});
+  chains.set(waId, tail);
+  // Drop the entry once this is the last job, so the map cannot grow forever.
+  tail.then(() => { if (chains.get(waId) === tail) chains.delete(waId); });
+  return run;
+}
+
+export function handleInboundMessage(msg, contact) {
+  return serialize(msg.from, () => processInbound(msg, contact));
+}
+
+async function processInbound(msg, contact) {
   const from = msg.from;
 
   // Blocked: no reply, no model call, no escalation. The thread is left alone
@@ -119,7 +140,8 @@ export async function handleInboundMessage(msg, contact) {
     held.set(from, { texts: [userText], msgId: msg.id });
     console.log(`[handler] holding first reply to ${from} for ${FIRST_REPLY_DELAY_MS}ms`);
     setTimeout(() => {
-      deliverHeld(from).catch(err => console.error('[handler] held reply failed', from, err));
+      serialize(from, () => deliverHeld(from))
+        .catch(err => console.error('[handler] held reply failed', from, err));
     }, FIRST_REPLY_DELAY_MS);
     return;
   }
