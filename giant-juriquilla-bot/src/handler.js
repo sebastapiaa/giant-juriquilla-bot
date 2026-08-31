@@ -16,6 +16,25 @@ const ESCALATION_WINDOW_MS =
   Number.isFinite(rawWindow) && rawWindow >= 0 ? rawWindow : DEFAULT_ESCALATION_WINDOW_MS;
 console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms`);
 
+// Numbers the bot never answers. Matched on the last 10 digits, so it does not
+// matter whether WhatsApp delivers a Mexican number as 52... or 521... .
+// Add more below, or via BLOCKED_NUMBERS in Railway (comma-separated) — that
+// one needs a redeploy to take effect, like the other env vars here.
+const BLOCKED_NUMBERS = new Set(
+  [
+    '442 896 5926',
+    '55 4443 9349',
+    ...(process.env.BLOCKED_NUMBERS || '').split(','),
+  ]
+    .map(n => n.replace(/\D/g, '').slice(-10))
+    .filter(n => n.length === 10)
+);
+console.log(`[handler] blocked numbers: ${BLOCKED_NUMBERS.size}`);
+
+function isBlocked(waId) {
+  return BLOCKED_NUMBERS.has(String(waId).replace(/\D/g, '').slice(-10));
+}
+
 // The model has NO clock. Compute the real date/time ourselves, in Querétaro's
 // timezone (the server runs in UTC), and inject it every message. Without this
 // Gigo invents dates or thinks it's ~6h later than it is and says "ya cerramos"
@@ -45,6 +64,14 @@ const FALLBACK = 'Perdón, tuve un problema técnico. Un miembro del equipo te c
 
 export async function handleInboundMessage(msg, contact) {
   const from = msg.from;
+
+  // Blocked: no reply, no model call, no escalation. The thread is left alone
+  // entirely so staff can still see and answer it from the WhatsApp app.
+  if (isBlocked(from)) {
+    console.log(`[handler] ${from} is blocked — ignoring`);
+    return;
+  }
+
   if (alreadyHandled(msg.id)) return;
 
   // A human is handling this thread — stay quiet, but only for the escalation
