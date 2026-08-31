@@ -8,13 +8,22 @@ const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
 const TZ = process.env.TIMEZONE || 'America/Mexico_City';
 
 // How long a thread stays muted after a human takes over. Set small (e.g.
-// 120000) in Railway to test the resume, then back to 2h. A non-numeric or
-// negative value falls back to the default rather than muting forever / never.
-const DEFAULT_ESCALATION_WINDOW_MS = 7_200_000; // 2h
+// 120000) in Railway to test the resume. A non-numeric or negative value falls
+// back to the default rather than muting forever / never.
+const DEFAULT_ESCALATION_WINDOW_MS = 3_600_000; // 1h
 const rawWindow = Number(process.env.ESCALATION_WINDOW_MS);
 const ESCALATION_WINDOW_MS =
   Number.isFinite(rawWindow) && rawWindow >= 0 ? rawWindow : DEFAULT_ESCALATION_WINDOW_MS;
-console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms`);
+
+// On a thread with no history, hold the bot's first reply this long so staff
+// can take the conversation first — if a human answers during the wait, the bot
+// never speaks at all. Anything the customer sends meanwhile is folded into the
+// single reply. Set 0 to answer immediately.
+const rawDelay = Number(process.env.FIRST_REPLY_DELAY_MS);
+const FIRST_REPLY_DELAY_MS =
+  Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 300_000; // 5 min
+
+console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms, first-reply delay: ${FIRST_REPLY_DELAY_MS}ms`);
 
 // Numbers the bot never answers. Matched on the last 10 digits, so it does not
 // matter whether WhatsApp delivers a Mexican number as 52... or 521... .
@@ -62,6 +71,10 @@ function alreadyHandled(id) {
 
 const FALLBACK = 'Perdón, tuve un problema técnico. Un miembro del equipo te contacta en un momento.';
 
+// Threads whose first reply is waiting out FIRST_REPLY_DELAY_MS.
+// waId -> { texts: [...everything they said while we waited], msgId }
+const held = new Map();
+
 export async function handleInboundMessage(msg, contact) {
   const from = msg.from;
 
@@ -93,8 +106,41 @@ export async function handleInboundMessage(msg, contact) {
   }
 
   const userText = msg.text.body;
+
+  // First contact on a quiet thread — hold the reply so a human can take it.
+  if (FIRST_REPLY_DELAY_MS > 0 && (await getHistory(from)).length === 0) {
+    const waiting = held.get(from);
+    if (waiting) { waiting.texts.push(userText); return; } // folded into the pending reply
+
+    held.set(from, { texts: [userText], msgId: msg.id });
+    console.log(`[handler] holding first reply to ${from} for ${FIRST_REPLY_DELAY_MS}ms`);
+    setTimeout(() => {
+      deliverHeld(from).catch(err => console.error('[handler] held reply failed', from, err));
+    }, FIRST_REPLY_DELAY_MS);
+    return;
+  }
+
+  await generateAndSend(from, userText, msg.id);
+}
+
+// Fires once the hold lapses. Staff answering in the meantime cancels the bot
+// entirely — the thread is theirs and the bot never speaks on it.
+async function deliverHeld(from) {
+  const job = held.get(from);
+  held.delete(from);
+  if (!job) return;
+
+  const { escalated } = await getEscalation(from);
+  if (escalated) {
+    console.log(`[handler] staff answered ${from} during the hold — bot staying silent`);
+    return;
+  }
+  await generateAndSend(from, job.texts.join('\n'), job.msgId);
+}
+
+async function generateAndSend(from, userText, msgId) {
   try {
-    await sendTyping(msg.id).catch(() => {});
+    await sendTyping(msgId).catch(() => {});
     const history = await getHistory(from);
     const res = await anthropic.messages.create({
       model: MODEL,
