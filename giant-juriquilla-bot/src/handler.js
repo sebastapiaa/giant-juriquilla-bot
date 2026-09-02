@@ -75,6 +75,33 @@ function alreadyHandled(id) {
 
 const FALLBACK = 'Perdón, tuve un problema técnico. Un miembro del equipo te contacta en un momento.';
 
+// The customer explicitly asked for a person. Detected here, deterministically,
+// so the handoff never depends on the model noticing. Over-matching is the safe
+// failure (a human answers), so the list leans broad. Add phrases freely.
+const HUMAN_REQUEST_RE = new RegExp(
+  [
+    // Spanish
+    'hablar con (alguien|una persona|un humano|un asesor|un agente|un vendedor|el staff|el equipo|un encargado|un humano)',
+    'comunicar(me|se) con (alguien|una persona|un asesor|un humano|el staff|el equipo)',
+    'quiero (una|a una) persona', 'persona real', 'un humano', 'ser humano',
+    'no eres (una )?persona', 'no quiero (hablar con )?(un )?bot', 'atenci[oó]n humana', 'alguien del (equipo|staff|taller)',
+    '\\b(asesor|agente|representante|encargado|gerente)\\b',
+    // English
+    'talk (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
+    'speak (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
+    'real person', 'human being', 'a human', 'not a bot', '\\boperator\\b', '\\brepresentative\\b',
+  ].join('|'),
+  'i'
+);
+
+// The model was told to end every handoff with one of these sentences. If it
+// wrote the sentence but dropped the [ESCALAR] tag, treat it as escalated
+// anyway — the customer has been promised a person, so the bot must go quiet.
+const HANDOFF_PHRASE_RE = /(miembro del (staff|equipo)|alguien del (equipo|staff)|se pondr[aá] en contacto|te conectar[eé]|te contacta|someone from the team|will be in touch|get back to you|connect you with)/i;
+
+// The tag, tolerant of the model's formatting drift: [ESCALAR], ESCALAR, (ESCALAR).
+const ESCALATE_TAG_RE = /[\[\(]?\s*ESCALAR\s*[\]\)]?/gi;
+
 // Threads whose first reply is waiting out FIRST_REPLY_DELAY_MS.
 // waId -> { texts: [...everything they said while we waited], msgId }
 const held = new Map();
@@ -132,6 +159,15 @@ async function processInbound(msg, contact) {
 
   const userText = msg.text.body;
 
+  // Customer asked for a person. Hand off right away — no hold, no FAQ answer —
+  // and mute the thread for the escalation window.
+  if (HUMAN_REQUEST_RE.test(userText)) {
+    console.log(`[handler] ${from} asked for a human — handing off`);
+    held.delete(from); // a pending first reply must not fire after the handoff
+    await generateAndSend(from, userText, msg.id, { handoff: true });
+    return;
+  }
+
   // First contact on a quiet thread — hold the reply so a human can take it.
   if (FIRST_REPLY_DELAY_MS > 0 && (await getHistory(from)).length === 0) {
     const waiting = held.get(from);
@@ -164,24 +200,47 @@ async function deliverHeld(from) {
   await generateAndSend(from, job.texts.join('\n'), job.msgId);
 }
 
-async function generateAndSend(from, userText, msgId) {
+// Appended to the system prompt when the customer explicitly asked for a person:
+// the model only phrases the handoff (in the customer's language); it does not
+// decide whether to hand off.
+const HANDOFF_INSTRUCTION = `
+
+## Instrucción para ESTE mensaje
+El cliente pidió hablar con una persona. NO respondas su duda ni hagas preguntas. Responde ÚNICAMENTE con una frase cálida y terminal avisando que en seguida un miembro del staff se pondrá en contacto (en el idioma del cliente), y termina con la etiqueta [ESCALAR].`;
+
+async function generateAndSend(from, userText, msgId, { handoff = false } = {}) {
   try {
     await sendTyping(msgId).catch(() => {});
     const history = await getHistory(from);
     const res = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 500,
-      system: `${SYSTEM_PROMPT}\n\n## Fecha y hora\n${currentDateTimeMx()}`,
+      system: `${SYSTEM_PROMPT}\n\n## Fecha y hora\n${currentDateTimeMx()}${handoff ? HANDOFF_INSTRUCTION : ''}`,
       messages: [...history, { role: 'user', content: userText }],
     });
 
     let reply = res.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
-    const escalate = reply.includes('[ESCALAR]');
-    reply = reply.replace(/\[ESCALAR\]/g, '').trim() || FALLBACK;
+    // Escalate when: the customer asked for a person, the model tagged the
+    // reply, or the model promised a person without tagging. Any of the three
+    // means the bot must not answer the customer's next message.
+    const escalate = handoff || ESCALATE_TAG_RE.test(reply) || HANDOFF_PHRASE_RE.test(reply);
+    ESCALATE_TAG_RE.lastIndex = 0; // global regex: reset after .test()
+    reply = reply.replace(ESCALATE_TAG_RE, '').trim() || FALLBACK;
+
+    // Staff may have answered while the model was thinking. Their message
+    // stands; the bot's reply is dropped rather than talking over them.
+    const { escalated } = await getEscalation(from);
+    if (escalated && !escalate) {
+      console.log(`[handler] staff replied to ${from} while generating — dropping bot reply`);
+      return;
+    }
 
     await sendText(from, reply);
     await appendTurn(from, userText, reply);
-    if (escalate) await setEscalated(from, true);
+    if (escalate) {
+      await setEscalated(from, true);
+      console.log(`[handler] escalated ${from} (${handoff ? 'customer asked for a human' : 'bot could not answer'}) — muted for ${ESCALATION_WINDOW_MS}ms`);
+    }
   } catch (err) {
     console.error('[handler] error', err);
     await sendText(from, FALLBACK).catch(() => {});

@@ -4,6 +4,18 @@ FAQ bot on the shop's existing WhatsApp number (coexistence via Dualhook).
 Staff keep answering from the WhatsApp Business app; the bot handles FAQs and
 goes quiet the moment a human replies.
 
+## When the bot stays quiet
+The bot mutes a thread for `ESCALATION_WINDOW_MS` (default 1h, clock restarts on
+every staff message) whenever any of these happen:
+- **Staff replied** — a message sent from the shop's own number, either as a
+  coexistence echo or as a plain message whose sender is `BUSINESS_WA_NUMBER`.
+  The bot's own API sends are recognised and do not count.
+- **Customer asked for a person** — matched deterministically in `handler.js`
+  (`HUMAN_REQUEST_RE`), so it never depends on the model noticing.
+- **Bot could not answer** — the model tags its reply `[ESCALAR]`, or writes a
+  handoff sentence ("un miembro del staff se pondrá en contacto…") without the tag.
+If staff answer while the bot is still generating, the bot's reply is dropped.
+
 ## Edit this
 - `src/knowledge.js` — the system prompt + FAQ. THE file you change. Fill every TODO.
 

@@ -6,9 +6,26 @@ import { setEscalated, clearHistory } from './store.js';
 const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
-const { PORT = 3000, META_VERIFY_TOKEN, META_APP_SECRET, ADMIN_KEY } = process.env;
+const { PORT = 3000, META_VERIFY_TOKEN, META_APP_SECRET, ADMIN_KEY, BUSINESS_WA_NUMBER } = process.env;
 
 if (!ADMIN_KEY) console.warn('[admin] ADMIN_KEY unset — /admin/reset is disabled (404s)');
+if (!BUSINESS_WA_NUMBER) console.warn('[webhook] BUSINESS_WA_NUMBER unset — staff replies are only recognised via echoes or webhook metadata');
+
+const last10 = n => String(n ?? '').replace(/\D/g, '').slice(-10);
+
+// A message whose SENDER is the business number itself is a staff member
+// writing from the WhatsApp Business app — the same party as the bot — not a
+// customer. Some relays deliver those inside `messages` rather than as echoes,
+// and without this check the bot would treat the shop as a customer and reply
+// to its own number. The business number comes from the webhook metadata when
+// present, or BUSINESS_WA_NUMBER as a fallback.
+function isFromBusiness(msg, value) {
+  if (msg.from_me === true) return true;
+  const sender = last10(msg.from);
+  if (sender.length !== 10) return false;
+  const known = [value.metadata?.display_phone_number, BUSINESS_WA_NUMBER].map(last10).filter(n => n.length === 10);
+  return known.includes(sender);
+}
 
 // 1. Webhook verification — Meta/Dualhook calls this once when you save the URL
 app.get('/webhook', (req, res) => {
@@ -54,6 +71,14 @@ app.post('/webhook', (req, res) => {
     // Normal customer message
     if (!value.messages) return; // status callbacks (delivered/read) land here too
     for (const msg of value.messages) {
+      if (isFromBusiness(msg, value)) {
+        // Staff reply delivered as a plain message. Route it through the echo
+        // handler so the thread is muted (unless it was the bot's own send).
+        const customer = msg.to || msg.recipient_id || msg.recipient?.wa_id
+          || value.contacts?.find(c => last10(c.wa_id) !== last10(msg.from))?.wa_id;
+        handleStaffEcho({ ...msg, to: customer }).catch(err => console.error('[echo]', msg.id, err));
+        continue;
+      }
       const contact = value.contacts?.find(c => c.wa_id === msg.from);
       handleInboundMessage(msg, contact).catch(err => console.error('[handler]', msg.id, err));
     }
