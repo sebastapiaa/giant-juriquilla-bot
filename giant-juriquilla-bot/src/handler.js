@@ -150,39 +150,45 @@ async function processInbound(msg, contact) {
     console.log(`[handler] escalation window lapsed for ${from} after ${Math.round(mutedFor / 1000)}s — bot resuming`);
   }
 
-  // Only text for now; anything else goes to a person.
-  if (msg.type !== 'text') {
-    await sendText(from, 'Gracias por tu mensaje. Con gusto un miembro del equipo lo revisa y te responde en un momentito.');
-    await setEscalated(from, true);
-    return;
-  }
+  // Classify the message. 'media' = anything that is not text (goes to a
+  // person), 'handoff' = the customer asked for a person, 'text' = a question
+  // the bot may answer.
+  const userText = msg.type === 'text' ? msg.text.body : null;
+  const kind = userText === null ? 'media'
+    : HUMAN_REQUEST_RE.test(userText) ? 'handoff'
+    : 'text';
+  if (kind === 'handoff') console.log(`[handler] ${from} asked for a human`);
 
-  const userText = msg.text.body;
-
-  // Customer asked for a person. Hand off right away — no hold, no FAQ answer —
-  // and mute the thread for the escalation window.
-  if (HUMAN_REQUEST_RE.test(userText)) {
-    console.log(`[handler] ${from} asked for a human — handing off`);
-    held.delete(from); // a pending first reply must not fire after the handoff
-    await generateAndSend(from, userText, msg.id, { handoff: true });
-    return;
-  }
-
-  // First contact on a quiet thread — hold the reply so a human can take it.
+  // First contact on a quiet thread — EVERY kind of reply waits out
+  // FIRST_REPLY_DELAY_MS so a human can take the conversation first. Ongoing
+  // conversations (any stored turn in the last 24h) are answered immediately.
   if (FIRST_REPLY_DELAY_MS > 0 && (await getHistory(from)).length === 0) {
-    const waiting = held.get(from);
-    if (waiting) { waiting.texts.push(userText); return; } // folded into the pending reply
-
-    held.set(from, { texts: [userText], msgId: msg.id });
-    console.log(`[handler] holding first reply to ${from} for ${FIRST_REPLY_DELAY_MS}ms`);
-    setTimeout(() => {
-      serialize(from, () => deliverHeld(from))
-        .catch(err => console.error('[handler] held reply failed', from, err));
-    }, FIRST_REPLY_DELAY_MS);
+    hold(from, kind, userText, msg.id);
     return;
   }
 
-  await generateAndSend(from, userText, msg.id);
+  await respond(from, kind, userText === null ? [] : [userText], msg.id);
+}
+
+// media > handoff > text: a held batch takes the "strongest" kind it has seen,
+// so a photo followed by a question still goes to a person.
+const KIND_RANK = { text: 0, handoff: 1, media: 2 };
+
+function hold(from, kind, userText, msgId) {
+  const waiting = held.get(from);
+  if (waiting) {
+    // Folded into the pending reply.
+    if (userText !== null) waiting.texts.push(userText);
+    if (KIND_RANK[kind] > KIND_RANK[waiting.kind]) waiting.kind = kind;
+    return;
+  }
+
+  held.set(from, { kind, texts: userText === null ? [] : [userText], msgId });
+  console.log(`[handler] holding first reply (${kind}) to ${from} for ${FIRST_REPLY_DELAY_MS}ms`);
+  setTimeout(() => {
+    serialize(from, () => deliverHeld(from))
+      .catch(err => console.error('[handler] held reply failed', from, err));
+  }, FIRST_REPLY_DELAY_MS);
 }
 
 // Fires once the hold lapses. Staff answering in the meantime cancels the bot
@@ -197,7 +203,20 @@ async function deliverHeld(from) {
     console.log(`[handler] staff answered ${from} during the hold — bot staying silent`);
     return;
   }
-  await generateAndSend(from, job.texts.join('\n'), job.msgId);
+  await respond(from, job.kind, job.texts, job.msgId);
+}
+
+const MEDIA_REPLY = 'Gracias por tu mensaje. Con gusto un miembro del equipo lo revisa y te responde en un momentito.';
+
+// Shared by the immediate and held paths.
+async function respond(from, kind, texts, msgId) {
+  if (kind === 'media') {
+    await sendText(from, MEDIA_REPLY);
+    await setEscalated(from, true);
+    console.log(`[handler] non-text message from ${from} — handed to staff, muted for ${ESCALATION_WINDOW_MS}ms`);
+    return;
+  }
+  await generateAndSend(from, texts.join('\n'), msgId, { handoff: kind === 'handoff' });
 }
 
 // Appended to the system prompt when the customer explicitly asked for a person:
