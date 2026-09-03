@@ -15,15 +15,16 @@ const rawWindow = Number(process.env.ESCALATION_WINDOW_MS);
 const ESCALATION_WINDOW_MS =
   Number.isFinite(rawWindow) && rawWindow >= 0 ? rawWindow : DEFAULT_ESCALATION_WINDOW_MS;
 
-// On a thread with no history, hold the bot's first reply this long so staff
-// can take the conversation first — if a human answers during the wait, the bot
-// never speaks at all. Anything the customer sends meanwhile is folded into the
-// single reply. Set 0 to answer immediately.
-const rawDelay = Number(process.env.FIRST_REPLY_DELAY_MS);
-const FIRST_REPLY_DELAY_MS =
+// Hold EVERY bot reply this long so staff can take the conversation first —
+// if a human answers during the wait, the bot never speaks. Anything the
+// customer sends meanwhile is folded into the single reply. Applies to first
+// contact and ongoing conversations alike. Set 0 to answer immediately.
+// FIRST_REPLY_DELAY_MS is the old name and still works.
+const rawDelay = Number(process.env.REPLY_DELAY_MS ?? process.env.FIRST_REPLY_DELAY_MS);
+const REPLY_DELAY_MS =
   Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 300_000; // 5 min
 
-console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms, first-reply delay: ${FIRST_REPLY_DELAY_MS}ms`);
+console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms, reply delay: ${REPLY_DELAY_MS}ms`);
 
 // Numbers the bot never answers. Matched on the last 10 digits, so it does not
 // matter whether WhatsApp delivers a Mexican number as 52... or 521... .
@@ -102,7 +103,7 @@ const HANDOFF_PHRASE_RE = /(miembro del (staff|equipo)|alguien del (equipo|staff
 // The tag, tolerant of the model's formatting drift: [ESCALAR], ESCALAR, (ESCALAR).
 const ESCALATE_TAG_RE = /[\[\(]?\s*ESCALAR\s*[\]\)]?/gi;
 
-// Threads whose first reply is waiting out FIRST_REPLY_DELAY_MS.
+// Threads whose reply is waiting out REPLY_DELAY_MS.
 // waId -> { texts: [...everything they said while we waited], msgId }
 const held = new Map();
 
@@ -159,10 +160,9 @@ async function processInbound(msg, contact) {
     : 'text';
   if (kind === 'handoff') console.log(`[handler] ${from} asked for a human`);
 
-  // First contact on a quiet thread — EVERY kind of reply waits out
-  // FIRST_REPLY_DELAY_MS so a human can take the conversation first. Ongoing
-  // conversations (any stored turn in the last 24h) are answered immediately.
-  if (FIRST_REPLY_DELAY_MS > 0 && (await getHistory(from)).length === 0) {
+  // EVERY kind of reply, on every message, waits out REPLY_DELAY_MS so a
+  // human can take the conversation first.
+  if (REPLY_DELAY_MS > 0) {
     hold(from, kind, userText, msg.id);
     return;
   }
@@ -184,11 +184,11 @@ function hold(from, kind, userText, msgId) {
   }
 
   held.set(from, { kind, texts: userText === null ? [] : [userText], msgId });
-  console.log(`[handler] holding first reply (${kind}) to ${from} for ${FIRST_REPLY_DELAY_MS}ms`);
+  console.log(`[handler] holding reply (${kind}) to ${from} for ${REPLY_DELAY_MS}ms`);
   setTimeout(() => {
     serialize(from, () => deliverHeld(from))
       .catch(err => console.error('[handler] held reply failed', from, err));
-  }, FIRST_REPLY_DELAY_MS);
+  }, REPLY_DELAY_MS);
 }
 
 // Fires once the hold lapses. Staff answering in the meantime cancels the bot

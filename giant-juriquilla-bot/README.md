@@ -17,12 +17,12 @@ every staff message) whenever any of these happen:
 If staff answer while the bot is still generating, the bot's reply is dropped.
 
 ## Response timing
-- **First contact** (no stored turn from that number in the last 24h): every
-  reply — FAQ answer, photo/audio handoff, or "talk to a person" handoff —
-  waits `FIRST_REPLY_DELAY_MS` (default 5 min). Messages sent during the wait
-  are folded into one reply. If staff answer during the wait, the bot says nothing.
-- **Ongoing conversation**: replies are immediate.
-Set `FIRST_REPLY_DELAY_MS=0` in Railway to make first contact instant too.
+Every reply — FAQ answer, photo/audio handoff, or "talk to a person" handoff —
+waits `REPLY_DELAY_MS` (default 5 min) before the bot sends it, on first contact
+and on ongoing conversations alike. Messages the customer sends during the wait
+are folded into one reply. If staff answer during the wait, the bot says nothing.
+Set `REPLY_DELAY_MS=0` in Railway to make replies instant. (The old name
+`FIRST_REPLY_DELAY_MS` is still honoured if `REPLY_DELAY_MS` is not set.)
 
 ## Edit this
 - `src/knowledge.js` — the system prompt + FAQ. THE file you change. Fill every TODO.
