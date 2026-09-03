@@ -143,10 +143,12 @@ async function processInbound(msg, contact) {
   // window. Once it lapses the bot picks the conversation back up by itself,
   // instead of the thread staying muted until the 24h TTL.
   const { escalated, escalatedAt } = await getEscalation(from);
+  let resumed = false;
   if (escalated) {
     const mutedFor = Date.now() - escalatedAt;
     if (mutedFor < ESCALATION_WINDOW_MS) return;
     await setEscalated(from, false);
+    resumed = true;
     console.log(`[handler] escalation window lapsed for ${from} after ${Math.round(mutedFor / 1000)}s — bot resuming`);
   }
 
@@ -162,7 +164,13 @@ async function processInbound(msg, contact) {
   // First contact on a quiet thread — EVERY kind of reply waits out
   // FIRST_REPLY_DELAY_MS so a human can take the conversation first. Ongoing
   // conversations (any stored turn in the last 24h) are answered immediately.
-  if (FIRST_REPLY_DELAY_MS > 0 && (await getHistory(from)).length === 0) {
+  //
+  // `resumed` counts as first contact too: a human owned this thread until the
+  // escalation window lapsed, so give staff the same head start before the bot
+  // speaks on it again. getHistory still runs either way, so an expired thread
+  // is evicted on schedule.
+  const history = await getHistory(from);
+  if (FIRST_REPLY_DELAY_MS > 0 && (history.length === 0 || resumed)) {
     hold(from, kind, userText, msg.id);
     return;
   }

@@ -7,6 +7,11 @@ const STORE_PATH = process.env.CONVO_STORE_PATH || '/data/conversations.json';
 const TTL_MS = 24 * 60 * 60 * 1000; // WhatsApp's 24h service window
 const MAX_TURNS = 12;
 
+// INVARIANT: `updatedAt` means "when this thread last had a conversational
+// turn", and only appendTurn/clearHistory may write it. It is what TTL expiry
+// and handler.js's first-contact check both read, so anything else that
+// re-stamps it keeps dead threads alive. Escalation has its own `escalatedAt`.
+
 let cache = null;
 let writeQueue = Promise.resolve();
 
@@ -79,6 +84,10 @@ export async function setEscalated(waId, value) {
   db[waId] = db[waId] ?? { messages: [], updatedAt: Date.now() };
   db[waId].escalated = value;
   db[waId].escalatedAt = value ? Date.now() : null;
-  db[waId].updatedAt = Date.now();
+  // NOTE: updatedAt is deliberately NOT touched here — see the invariant above.
+  // Stamping it made escalation resurrect expired history: handler.js reads the
+  // escalation first, and clearing a lapsed one re-dated the record, so
+  // day-old turns survived the TTL and the thread no longer looked like first
+  // contact — which silently skipped the 5-minute hold.
   await persist();
 }
