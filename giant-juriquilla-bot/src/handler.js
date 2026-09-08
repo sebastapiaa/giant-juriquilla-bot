@@ -138,6 +138,15 @@ async function processInbound(msg, contact) {
     return;
   }
 
+  // A reaction is an emoji stuck on an earlier message, not a question. Ignore
+  // it completely — no reply, no escalation, no thread state touched. Without
+  // this it fell through to the non-text branch below and both answered the
+  // customer and muted the bot.
+  if (msg.type === 'reaction') {
+    console.log(`[handler] reaction from ${from} — ignoring`);
+    return;
+  }
+
   if (alreadyHandled(msg.id)) return;
 
   // A human is handling this thread — stay quiet, but only for the escalation
