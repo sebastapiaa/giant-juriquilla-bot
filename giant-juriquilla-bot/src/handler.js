@@ -219,7 +219,8 @@ async function deliverHeld(from) {
   await respond(from, job.kind, job.texts, job.msgId);
 }
 
-const MEDIA_REPLY = 'Gracias por tu mensaje. Con gusto un miembro del equipo lo revisa y te responde en un momentito.';
+// Sin diminutivos: era "en un momentito".
+const MEDIA_REPLY = 'Gracias por tu mensaje. Con gusto un miembro del equipo lo revisa y te responde en un momento.';
 
 // Shared by the immediate and held paths.
 async function respond(from, kind, texts, msgId) {
