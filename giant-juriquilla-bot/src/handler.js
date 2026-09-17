@@ -38,6 +38,10 @@ const BLOCKED_NUMBERS = new Set(
     '462 402 7576',
     '442 386 9454',
     '442 468 3742',
+    '55 4337 0809',
+    '442 353 0492',
+    '442 365 5645',
+    '442 378 7614',
     ...(process.env.BLOCKED_NUMBERS || '').split(','),
   ]
     .map(n => n.replace(/\D/g, '').slice(-10))
