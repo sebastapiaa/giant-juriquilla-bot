@@ -26,8 +26,13 @@ const REPLY_DELAY_MS =
 
 console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms, reply delay: ${REPLY_DELAY_MS}ms`);
 
-// Numbers the bot never answers. Matched on the last 10 digits, so it does not
-// matter whether WhatsApp delivers a Mexican number as 52... or 521... .
+// Numbers the bot never answers.
+//
+// Matching ignores the country code entirely: both Mexico and the US/Canada use
+// 10-digit national numbers, so comparing the LAST 10 DIGITS blocks the same
+// person whichever prefix WhatsApp delivers — +52, +521 (the Mexican mobile 1),
+// +1, or none at all. Punctuation and spaces are stripped first.
+//
 // Add more below, or via BLOCKED_NUMBERS in Railway (comma-separated) — that
 // one needs a redeploy to take effect, like the other env vars here.
 const BLOCKED_NUMBERS = new Set(
@@ -42,6 +47,8 @@ const BLOCKED_NUMBERS = new Set(
     '442 353 0492',
     '442 365 5645',
     '442 378 7614',
+    '442 385 8531',
+    '477 699 0168',
     ...(process.env.BLOCKED_NUMBERS || '').split(','),
   ]
     .map(n => n.replace(/\D/g, '').slice(-10))
