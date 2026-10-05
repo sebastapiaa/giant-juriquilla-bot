@@ -26,7 +26,31 @@ const rawDelay = Number(process.env.REPLY_DELAY_MS ?? process.env.FIRST_REPLY_DE
 const REPLY_DELAY_MS =
   Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 300_000; // 5 min
 
-console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms, reply delay: ${REPLY_DELAY_MS}ms`);
+// Outside shop hours nobody is going to answer first, so the hold is skipped
+// and the bot replies at once. The window is [start, end) in TZ hours, and it
+// may wrap midnight: the default 20 → 10 means 8pm until 10am. Set both to the
+// same value to disable the window (hold always applies).
+const parseHour = (raw, fallback) => {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 23 ? n : fallback;
+};
+const INSTANT_REPLY_START_HOUR = parseHour(process.env.INSTANT_REPLY_START_HOUR, 20);
+const INSTANT_REPLY_END_HOUR = parseHour(process.env.INSTANT_REPLY_END_HOUR, 10);
+
+console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms, reply delay: ${REPLY_DELAY_MS}ms, instant replies ${INSTANT_REPLY_START_HOUR}:00–${INSTANT_REPLY_END_HOUR}:00 ${TZ}`);
+
+// Pure check, so the wrap-around logic can be reasoned about on its own.
+export function isInstantHour(hour, start = INSTANT_REPLY_START_HOUR, end = INSTANT_REPLY_END_HOUR) {
+  if (start === end) return false;
+  return start < end ? hour >= start && hour < end : hour >= start || hour < end;
+}
+
+// Current hour (0–23) in the shop's timezone. hourCycle h23 avoids the "24"
+// that hour12:false can produce at midnight.
+function currentHourMx() {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', hourCycle: 'h23' }).formatToParts(new Date());
+  return Number(parts.find(p => p.type === 'hour')?.value);
+}
 
 // Numbers the bot never answers.
 //
@@ -195,10 +219,16 @@ async function processInbound(msg, contact) {
   if (kind === 'handoff') console.log(`[handler] ${from} asked for a human`);
 
   // EVERY kind of reply, on every message, waits out REPLY_DELAY_MS so a
-  // human can take the conversation first.
+  // human can take the conversation first — except outside shop hours, when
+  // no human is coming and the customer gets the answer at once.
   if (REPLY_DELAY_MS > 0) {
-    hold(from, kind, userText, msg.id);
-    return;
+    const hour = currentHourMx();
+    if (isInstantHour(hour)) {
+      console.log(`[handler] ${hour}:xx ${TZ} is outside shop hours — replying to ${from} immediately`);
+    } else {
+      hold(from, kind, userText, msg.id);
+      return;
+    }
   }
 
   await respond(from, kind, userText === null ? [] : [userText], msg.id);

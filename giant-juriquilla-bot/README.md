@@ -32,6 +32,13 @@ are folded into one reply. If staff answer during the wait, the bot says nothing
 Set `REPLY_DELAY_MS=0` in Railway to make replies instant. (The old name
 `FIRST_REPLY_DELAY_MS` is still honoured if `REPLY_DELAY_MS` is not set.)
 
+**Outside shop hours the hold is skipped** and the bot replies immediately,
+since no staff member is going to answer first. By default that is 8pm to
+10am in `TIMEZONE` (America/Mexico_City). Change it with
+`INSTANT_REPLY_START_HOUR` / `INSTANT_REPLY_END_HOUR` (0–23; the range may
+wrap midnight; set both to the same value to disable). Escalation rules are
+unchanged: a thread staff replied to stays muted either way.
+
 ## Edit this
 - `src/knowledge.js` — the system prompt + FAQ. THE file you change. Fill every TODO.
 
