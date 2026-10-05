@@ -3,7 +3,9 @@ import { sendText, sendTyping, wasSentByBot, wasRecentlySentBody } from './whats
 import { getHistory, appendTurn, getEscalation, setEscalated } from './store.js';
 import { SYSTEM_PROMPT } from './knowledge.js';
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// The SDK retries 429 / 5xx / connection errors by itself; three attempts
+// instead of the default two covers short API hiccups without a long wait.
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 3 });
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
 const TZ = process.env.TIMEZONE || 'America/Mexico_City';
 
@@ -87,26 +89,35 @@ function alreadyHandled(id) {
   return false;
 }
 
-const FALLBACK = 'Perdón, tuve un problema técnico. Un miembro del equipo te contacta en un momento.';
+// What the customer sees when the bot cannot produce an answer (model error,
+// empty reply). It never mentions a technical problem: the customer gets the
+// same warm handoff as any other escalation, and staff pick the thread up.
+const FALLBACK = 'Gracias por tu mensaje 🙂 En un momento un miembro del staff se pondrá en contacto contigo.';
+
+// Sent when the customer explicitly asks for a person. Fixed text, no model
+// call: a handoff must never depend on the API being up.
+const HANDOFF_REPLY_ES = 'Con gusto 🙂 En seguida un miembro del staff se pondrá en contacto contigo.';
+const HANDOFF_REPLY_EN = 'Of course 🙂 Someone from the team will be in touch shortly.';
 
 // The customer explicitly asked for a person. Detected here, deterministically,
 // so the handoff never depends on the model noticing. Over-matching is the safe
 // failure (a human answers), so the list leans broad. Add phrases freely.
-const HUMAN_REQUEST_RE = new RegExp(
-  [
-    // Spanish
-    'hablar con (alguien|una persona|un humano|un asesor|un agente|un vendedor|el staff|el equipo|un encargado|un humano)',
-    'comunicar(me|se) con (alguien|una persona|un asesor|un humano|el staff|el equipo)',
-    'quiero (una|a una) persona', 'persona real', 'un humano', 'ser humano',
-    'no eres (una )?persona', 'no quiero (hablar con )?(un )?bot', 'atenci[oó]n humana', 'alguien del (equipo|staff|taller)',
-    '\\b(asesor|agente|representante|encargado|gerente)\\b',
-    // English
-    'talk (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
-    'speak (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
-    'real person', 'human being', 'a human', 'not a bot', '\\boperator\\b', '\\brepresentative\\b',
-  ].join('|'),
-  'i'
-);
+const HUMAN_REQUEST_ES = [
+  'hablar con (alguien|una persona|un humano|un asesor|un agente|un vendedor|el staff|el equipo|un encargado|un humano)',
+  'comunicar(me|se) con (alguien|una persona|un asesor|un humano|el staff|el equipo)',
+  'quiero (una|a una) persona', 'persona real', 'un humano', 'ser humano',
+  'no eres (una )?persona', 'no quiero (hablar con )?(un )?bot', 'atenci[oó]n humana', 'alguien del (equipo|staff|taller)',
+  '\\b(asesor|agente|representante|encargado|gerente)\\b',
+];
+const HUMAN_REQUEST_EN = [
+  'talk (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
+  'speak (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
+  'real person', 'human being', 'a human', 'not a bot', '\\boperator\\b', '\\brepresentative\\b',
+];
+const HUMAN_REQUEST_RE = new RegExp([...HUMAN_REQUEST_ES, ...HUMAN_REQUEST_EN].join('|'), 'i');
+// Only the English phrases. Decides which handoff sentence to send; Spanish
+// is the default when nothing English matched.
+const HUMAN_REQUEST_EN_RE = new RegExp(HUMAN_REQUEST_EN.join('|'), 'i');
 
 // The model was told to end every handoff with one of these sentences. If it
 // wrote the sentence but dropped the [ESCALAR] tag, treat it as escalated
@@ -239,35 +250,41 @@ async function respond(from, kind, texts, msgId) {
     console.log(`[handler] non-text message from ${from} — handed to staff, muted for ${ESCALATION_WINDOW_MS}ms`);
     return;
   }
-  await generateAndSend(from, texts.join('\n'), msgId, { handoff: kind === 'handoff' });
+  const userText = texts.join('\n');
+  if (kind === 'handoff') {
+    // Deterministic: the customer asked for a person, so promise one and go
+    // quiet. No model call, so an API outage cannot turn this into an apology.
+    const reply = HUMAN_REQUEST_EN_RE.test(userText) ? HANDOFF_REPLY_EN : HANDOFF_REPLY_ES;
+    await sendTyping(msgId).catch(() => {});
+    await sendText(from, reply);
+    await appendTurn(from, userText, reply);
+    await setEscalated(from, true);
+    console.log(`[handler] escalated ${from} (customer asked for a human) — muted for ${ESCALATION_WINDOW_MS}ms`);
+    return;
+  }
+  await generateAndSend(from, userText, msgId);
 }
 
-// Appended to the system prompt when the customer explicitly asked for a person:
-// the model only phrases the handoff (in the customer's language); it does not
-// decide whether to hand off.
-const HANDOFF_INSTRUCTION = `
-
-## Instrucción para ESTE mensaje
-El cliente pidió hablar con una persona. NO respondas su duda ni hagas preguntas. Responde ÚNICAMENTE con una frase cálida y terminal avisando que en seguida un miembro del staff se pondrá en contacto (en el idioma del cliente), y termina con la etiqueta [ESCALAR].`;
-
-async function generateAndSend(from, userText, msgId, { handoff = false } = {}) {
+async function generateAndSend(from, userText, msgId) {
   try {
     await sendTyping(msgId).catch(() => {});
     const history = await getHistory(from);
     const res = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 500,
-      system: `${SYSTEM_PROMPT}\n\n## Fecha y hora\n${currentDateTimeMx()}${handoff ? HANDOFF_INSTRUCTION : ''}`,
+      system: `${SYSTEM_PROMPT}\n\n## Fecha y hora\n${currentDateTimeMx()}`,
       messages: [...history, { role: 'user', content: userText }],
     });
 
     let reply = res.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
-    // Escalate when: the customer asked for a person, the model tagged the
-    // reply, or the model promised a person without tagging. Any of the three
-    // means the bot must not answer the customer's next message.
-    const escalate = handoff || ESCALATE_TAG_RE.test(reply) || HANDOFF_PHRASE_RE.test(reply);
+    // Escalate when the model tagged the reply, promised a person without
+    // tagging, or produced nothing usable (the customer then gets the handoff
+    // text, so the bot must go quiet either way).
+    const tagged = ESCALATE_TAG_RE.test(reply);
     ESCALATE_TAG_RE.lastIndex = 0; // global regex: reset after .test()
-    reply = reply.replace(ESCALATE_TAG_RE, '').trim() || FALLBACK;
+    reply = reply.replace(ESCALATE_TAG_RE, '').trim();
+    const escalate = tagged || !reply || HANDOFF_PHRASE_RE.test(reply);
+    if (!reply) reply = FALLBACK;
 
     // Staff may have answered while the model was thinking. Their message
     // stands; the bot's reply is dropped rather than talking over them.
@@ -281,13 +298,29 @@ async function generateAndSend(from, userText, msgId, { handoff = false } = {}) 
     await appendTurn(from, userText, reply);
     if (escalate) {
       await setEscalated(from, true);
-      console.log(`[handler] escalated ${from} (${handoff ? 'customer asked for a human' : 'bot could not answer'}) — muted for ${ESCALATION_WINDOW_MS}ms`);
+      console.log(`[handler] escalated ${from} (bot could not answer) — muted for ${ESCALATION_WINDOW_MS}ms`);
     }
   } catch (err) {
-    console.error('[handler] error', err);
-    await sendText(from, FALLBACK).catch(() => {});
+    logModelError(from, err);
+    // The customer never learns there was an error: they get the standard
+    // warm handoff and staff take the thread. If staff already answered while
+    // we were failing, say nothing at all.
+    const { escalated } = await getEscalation(from).catch(() => ({ escalated: false }));
+    if (!escalated) await sendText(from, FALLBACK).catch(e => console.error('[handler] fallback send failed', from, e.message));
     await setEscalated(from, true).catch(() => {});
   }
+}
+
+// One line per failure, naming the cause, instead of the SDK's full error
+// object with every response header. Most specific class first.
+function logModelError(from, err) {
+  let cause = 'unknown';
+  if (err instanceof Anthropic.AuthenticationError) cause = 'auth: ANTHROPIC_API_KEY is invalid or revoked';
+  else if (err instanceof Anthropic.NotFoundError) cause = `not found: CLAUDE_MODEL "${MODEL}" may be wrong or retired`;
+  else if (err instanceof Anthropic.RateLimitError) cause = 'rate limited (429) after retries';
+  else if (err instanceof Anthropic.APIConnectionError) cause = 'network: could not reach the API after retries';
+  else if (err instanceof Anthropic.APIError) cause = `API ${err.status}`;
+  console.error(`[handler] model call failed for ${from} — ${cause} — ${err?.constructor?.name}: ${err?.message}`);
 }
 
 // Fields that might carry the message's origin. Logged only — see the note in

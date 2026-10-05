@@ -3,10 +3,16 @@
   "version": "1.0.0",
   "type": "module",
   "main": "src/server.js",
-  "scripts": { "start": "node src/server.js", "dev": "node --watch src/server.js" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node scripts/check-claude.mjs"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
     "express": "^4.21.2"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

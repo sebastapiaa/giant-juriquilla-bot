@@ -11,10 +11,18 @@ every staff message) whenever any of these happen:
   coexistence echo or as a plain message whose sender is `BUSINESS_WA_NUMBER`.
   The bot's own API sends are recognised and do not count.
 - **Customer asked for a person** — matched deterministically in `handler.js`
-  (`HUMAN_REQUEST_RE`), so it never depends on the model noticing.
-- **Bot could not answer** — the model tags its reply `[ESCALAR]`, or writes a
-  handoff sentence ("un miembro del staff se pondrá en contacto…") without the tag.
-If staff answer while the bot is still generating, the bot's reply is dropped.
+  (`HUMAN_REQUEST_RE`), so it never depends on the model noticing. The handoff
+  sentence is fixed text (Spanish or English, by what they wrote) and the model
+  is not called at all, so an API outage cannot break a handoff.
+- **Bot could not answer** — the model tags its reply `[ESCALAR]`, writes a
+  handoff sentence ("un miembro del staff se pondrá en contacto…") without the
+  tag, or returns nothing usable.
+- **Model call failed** — invalid key, wrong model, rate limit after retries,
+  network. The customer gets the same warm handoff as any other escalation
+  (never an apology about a technical problem) and one log line names the
+  cause: `[handler] model call failed for <number> — <cause>`.
+If staff answer while the bot is still generating or failing, the bot's reply
+is dropped.
 
 ## Response timing
 Every reply — FAQ answer, photo/audio handoff, or "talk to a person" handoff —
@@ -30,6 +38,7 @@ Set `REPLY_DELAY_MS=0` in Railway to make replies instant. (The old name
 ## Run locally
     npm install
     cp .env.example .env    # fill in at least ANTHROPIC_API_KEY + META_VERIFY_TOKEN
+    npm run check           # tests the Claude key + model and names the cause if it fails
     npm run dev
     # health check: http://localhost:3000/health
 
