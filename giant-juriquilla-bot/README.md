@@ -4,6 +4,19 @@ FAQ bot on the shop's existing WhatsApp number (coexistence via Dualhook).
 Staff keep answering from the WhatsApp Business app; the bot handles FAQs and
 goes quiet the moment a human replies.
 
+## First reply to each number
+GiLiMo's first successful reply to a number begins with this fixed introduction,
+followed by a blank line and the answer or handoff in the same WhatsApp message:
+
+> Hola soy GiLiMo 👋🏼, tu asistente virtual de WhatsApp 🤖.
+
+The introduction is added even if the customer starts directly with a question.
+It uses the usual reply delay and staff-takeover rules, and also applies to
+attachment handoffs and model-error fallbacks. It is recorded only after a
+successful send. The record survives the 24-hour history expiry, admin history
+resets, and redeploys on the Railway volume, so later replies skip it. Numbers
+without a recorded introduction receive it on their next bot reply.
+
 ## When the bot stays quiet
 The bot mutes a thread for `ESCALATION_WINDOW_MS` (default 1h, clock restarts on
 every staff message) whenever any of these happen:
@@ -46,6 +59,7 @@ unchanged: a thread staff replied to stays muted either way.
     npm install
     cp .env.example .env    # fill in at least ANTHROPIC_API_KEY + META_VERIFY_TOKEN
     npm run check           # tests the Claude key + model and names the cause if it fails
+    npm test                # offline introduction and reply-workflow tests
     npm run dev
     # health check: http://localhost:3000/health
 

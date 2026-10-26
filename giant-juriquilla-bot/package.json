@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "check": "node scripts/check-claude.mjs"
+    "check": "node scripts/check-claude.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

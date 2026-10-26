@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { sendText, sendTyping, wasSentByBot, wasRecentlySentBody } from './whatsapp.js';
-import { getHistory, appendTurn, getEscalation, setEscalated } from './store.js';
+import { getHistory, appendTurn, getEscalation, setEscalated, hasIntroduced, markIntroduced } from './store.js';
 import { SYSTEM_PROMPT } from './knowledge.js';
 
 // The SDK retries 429 / 5xx / connection errors by itself; three attempts
@@ -277,10 +277,22 @@ async function deliverHeld(from) {
 // Sin diminutivos: era "en un momentito".
 const MEDIA_REPLY = 'Gracias por tu mensaje. Con gusto un miembro del equipo lo revisa y te responde en un momento.';
 
+const INTRODUCTION = 'Hola soy GiLiMo 👋🏼, tu asistente virtual de WhatsApp 🤖.';
+
+// Every reply path uses this, including handoffs and failures. The per-number
+// queue prevents concurrent first replies; only a successful send consumes it.
+async function sendReply(from, reply) {
+  const firstReply = !(await hasIntroduced(from));
+  const body = firstReply ? `${INTRODUCTION}\n\n${reply}` : reply;
+  await sendText(from, body);
+  if (firstReply) await markIntroduced(from);
+  return body;
+}
+
 // Shared by the immediate and held paths.
 async function respond(from, kind, texts, msgId) {
   if (kind === 'media') {
-    await sendText(from, MEDIA_REPLY);
+    await sendReply(from, MEDIA_REPLY);
     await setEscalated(from, true);
     console.log(`[handler] non-text message from ${from} — handed to staff, muted for ${ESCALATION_WINDOW_MS}ms`);
     return;
@@ -291,8 +303,8 @@ async function respond(from, kind, texts, msgId) {
     // quiet. No model call, so an API outage cannot turn this into an apology.
     const reply = HUMAN_REQUEST_EN_RE.test(userText) ? HANDOFF_REPLY_EN : HANDOFF_REPLY_ES;
     await sendTyping(msgId).catch(() => {});
-    await sendText(from, reply);
-    await appendTurn(from, userText, reply);
+    const sentReply = await sendReply(from, reply);
+    await appendTurn(from, userText, sentReply);
     await setEscalated(from, true);
     console.log(`[handler] escalated ${from} (customer asked for a human) — muted for ${ESCALATION_WINDOW_MS}ms`);
     return;
@@ -329,8 +341,8 @@ async function generateAndSend(from, userText, msgId) {
       return;
     }
 
-    await sendText(from, reply);
-    await appendTurn(from, userText, reply);
+    const sentReply = await sendReply(from, reply);
+    await appendTurn(from, userText, sentReply);
     if (escalate) {
       await setEscalated(from, true);
       console.log(`[handler] escalated ${from} (bot could not answer) — muted for ${ESCALATION_WINDOW_MS}ms`);
@@ -341,7 +353,7 @@ async function generateAndSend(from, userText, msgId) {
     // warm handoff and staff take the thread. If staff already answered while
     // we were failing, say nothing at all.
     const { escalated } = await getEscalation(from).catch(() => ({ escalated: false }));
-    if (!escalated) await sendText(from, FALLBACK).catch(e => console.error('[handler] fallback send failed', from, e.message));
+    if (!escalated) await sendReply(from, FALLBACK).catch(e => console.error('[handler] fallback send failed', from, e.message));
     await setEscalated(from, true).catch(() => {});
   }
 }
