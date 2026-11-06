@@ -2,10 +2,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { sendText, sendTyping, wasSentByBot, wasRecentlySentBody } from './whatsapp.js';
 import { getHistory, appendTurn, getEscalation, setEscalated } from './store.js';
 import { SYSTEM_PROMPT } from './knowledge.js';
+import { scheduleContext } from './hours.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
-const TZ = process.env.TIMEZONE || 'America/Mexico_City';
 
 // How long a thread stays muted after a human takes over. Set small (e.g.
 // 120000) in Railway to test the resume. A non-numeric or negative value falls
@@ -49,21 +49,10 @@ function isBlocked(waId) {
   return BLOCKED_NUMBERS.has(String(waId).replace(/\D/g, '').slice(-10));
 }
 
-// The model has NO clock. Compute the real date/time ourselves, in Querétaro's
-// timezone (the server runs in UTC), and inject it every message. Without this
-// Gigo invents dates or thinks it's ~6h later than it is and says "ya cerramos"
-// while the store is open.
-function currentDateTimeMx() {
-  const now = new Date();
-  const fecha = new Intl.DateTimeFormat('es-MX', {
-    timeZone: TZ, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  }).format(now);
-  const hora = new Intl.DateTimeFormat('es-MX', {
-    timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: true,
-  }).format(now);
-  return `Fecha y hora actual en Juriquilla, Querétaro: ${fecha}, ${hora}. Usa SIEMPRE esta fecha y hora para responder sobre horarios, si la tienda está abierta ahora, o cualquier pregunta de tiempo. Nunca inventes ni supongas la fecha.`;
-}
-
+// The model has NO clock and reasons badly about dates. hours.js computes the
+// real date/time in Querétaro's timezone (the server runs in UTC) plus
+// open/closed-now, today's and tomorrow's hours and the next opening, and we
+// inject the finished answers every message so the model only paraphrases.
 // Dedup — Meta retries webhooks; same id twice = same reply twice.
 const seen = new Map();
 function alreadyHandled(id) {
@@ -234,7 +223,7 @@ async function generateAndSend(from, userText, msgId, { handoff = false } = {}) 
     const res = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 500,
-      system: `${SYSTEM_PROMPT}\n\n## Fecha y hora\n${currentDateTimeMx()}${handoff ? HANDOFF_INSTRUCTION : ''}`,
+      system: `${SYSTEM_PROMPT}\n\n## Fecha, hora y horario de HOY\n${scheduleContext()}${handoff ? HANDOFF_INSTRUCTION : ''}`,
       messages: [...history, { role: 'user', content: userText }],
     });
 

@@ -6,6 +6,10 @@
 //  the safe behavior.
 // ===========================================================================
 
+// Opening hours live in src/hours.js (HOURS) — edit them there, in one place.
+// The line below is generated from that table so the two can never disagree.
+import { hoursSummary } from './hours.js';
+
 // --- The FAQ / knowledge the bot answers from -----------------------------
 export const KNOWLEDGE = `
 # Giant Juriquilla
@@ -13,7 +17,7 @@ Distribuidor oficial Giant en Juriquilla, Querétaro, México.
 
 ## Ubicación y horarios
 - Dirección: Calle R. M. Clemencia Borja Taboada 528, PB-Local 10, Acueducto, 76230 Juriquilla, Qro., México
-- Horario: Lunes a viernes 10:00am–8:00pm · Sábado 9:00am–5:00pm · Domingo cerrado
+- Horario: ${hoursSummary()}
 - Teléfono (para llamar a la tienda): +52 442 251 5843
 - WhatsApp: +52 442 704 1833
 - Correo: contacto@giantjuriquilla.com
