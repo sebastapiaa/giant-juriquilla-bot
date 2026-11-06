@@ -1,11 +1,18 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { sendText, sendTyping, wasSentByBot, wasRecentlySentBody } from './whatsapp.js';
-import { getHistory, appendTurn, getEscalation, setEscalated } from './store.js';
+import { getHistory, appendTurn, getEscalation, setEscalated, hasIntroduced, markIntroduced } from './store.js';
 import { SYSTEM_PROMPT } from './knowledge.js';
+// The model has NO clock and reasons badly about dates. hours.js computes the
+// real date/time in Querétaro's timezone (the server runs in UTC) plus
+// open/closed-now, today's and tomorrow's hours and the next opening; the
+// finished sentences go into the system prompt so the model only paraphrases.
 import { scheduleContext } from './hours.js';
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// The SDK retries 429 / 5xx / connection errors by itself; three attempts
+// instead of the default two covers short API hiccups without a long wait.
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 3 });
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
+const TZ = process.env.TIMEZONE || 'America/Mexico_City';
 
 // How long a thread stays muted after a human takes over. Set small (e.g.
 // 120000) in Railway to test the resume. A non-numeric or negative value falls
@@ -24,10 +31,39 @@ const rawDelay = Number(process.env.REPLY_DELAY_MS ?? process.env.FIRST_REPLY_DE
 const REPLY_DELAY_MS =
   Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 300_000; // 5 min
 
-console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms, reply delay: ${REPLY_DELAY_MS}ms`);
+// Outside shop hours nobody is going to answer first, so the hold is skipped
+// and the bot replies at once. The window is [start, end) in TZ hours, and it
+// may wrap midnight: the default 20 → 10 means 8pm until 10am. Set both to the
+// same value to disable the window (hold always applies).
+const parseHour = (raw, fallback) => {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 23 ? n : fallback;
+};
+const INSTANT_REPLY_START_HOUR = parseHour(process.env.INSTANT_REPLY_START_HOUR, 20);
+const INSTANT_REPLY_END_HOUR = parseHour(process.env.INSTANT_REPLY_END_HOUR, 10);
 
-// Numbers the bot never answers. Matched on the last 10 digits, so it does not
-// matter whether WhatsApp delivers a Mexican number as 52... or 521... .
+console.log(`[handler] escalation window: ${ESCALATION_WINDOW_MS}ms, reply delay: ${REPLY_DELAY_MS}ms, instant replies ${INSTANT_REPLY_START_HOUR}:00–${INSTANT_REPLY_END_HOUR}:00 ${TZ}`);
+
+// Pure check, so the wrap-around logic can be reasoned about on its own.
+export function isInstantHour(hour, start = INSTANT_REPLY_START_HOUR, end = INSTANT_REPLY_END_HOUR) {
+  if (start === end) return false;
+  return start < end ? hour >= start && hour < end : hour >= start || hour < end;
+}
+
+// Current hour (0–23) in the shop's timezone. hourCycle h23 avoids the "24"
+// that hour12:false can produce at midnight.
+function currentHourMx() {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', hourCycle: 'h23' }).formatToParts(new Date());
+  return Number(parts.find(p => p.type === 'hour')?.value);
+}
+
+// Numbers the bot never answers.
+//
+// Matching ignores the country code entirely: both Mexico and the US/Canada use
+// 10-digit national numbers, so comparing the LAST 10 DIGITS blocks the same
+// person whichever prefix WhatsApp delivers — +52, +521 (the Mexican mobile 1),
+// +1, or none at all. Punctuation and spaces are stripped first.
+//
 // Add more below, or via BLOCKED_NUMBERS in Railway (comma-separated) — that
 // one needs a redeploy to take effect, like the other env vars here.
 const BLOCKED_NUMBERS = new Set(
@@ -38,6 +74,19 @@ const BLOCKED_NUMBERS = new Set(
     '462 402 7576',
     '442 386 9454',
     '442 468 3742',
+    '55 4337 0809',
+    '442 353 0492',
+    '442 365 5645',
+    '442 378 7614',
+    '442 385 8531',
+    '477 699 0168',
+    '55 1801 9281',
+    '55 2206 2955',
+    '54 9 3515 19-3923',
+    '54 9 3518 75-5309',
+    '52 1 55 5402 3980',
+    '55 2560 0817',
+    '442 239 1324',
     ...(process.env.BLOCKED_NUMBERS || '').split(','),
   ]
     .map(n => n.replace(/\D/g, '').slice(-10))
@@ -49,10 +98,6 @@ function isBlocked(waId) {
   return BLOCKED_NUMBERS.has(String(waId).replace(/\D/g, '').slice(-10));
 }
 
-// The model has NO clock and reasons badly about dates. hours.js computes the
-// real date/time in Querétaro's timezone (the server runs in UTC) plus
-// open/closed-now, today's and tomorrow's hours and the next opening, and we
-// inject the finished answers every message so the model only paraphrases.
 // Dedup — Meta retries webhooks; same id twice = same reply twice.
 const seen = new Map();
 function alreadyHandled(id) {
@@ -63,26 +108,35 @@ function alreadyHandled(id) {
   return false;
 }
 
-const FALLBACK = 'Perdón, tuve un problema técnico. Un miembro del equipo te contacta en un momento.';
+// What the customer sees when the bot cannot produce an answer (model error,
+// empty reply). It never mentions a technical problem: the customer gets the
+// same warm handoff as any other escalation, and staff pick the thread up.
+const FALLBACK = 'Gracias por tu mensaje 🙂 En un momento un miembro del staff se pondrá en contacto contigo.';
+
+// Sent when the customer explicitly asks for a person. Fixed text, no model
+// call: a handoff must never depend on the API being up.
+const HANDOFF_REPLY_ES = 'Con gusto 🙂 En seguida un miembro del staff se pondrá en contacto contigo.';
+const HANDOFF_REPLY_EN = 'Of course 🙂 Someone from the team will be in touch shortly.';
 
 // The customer explicitly asked for a person. Detected here, deterministically,
 // so the handoff never depends on the model noticing. Over-matching is the safe
 // failure (a human answers), so the list leans broad. Add phrases freely.
-const HUMAN_REQUEST_RE = new RegExp(
-  [
-    // Spanish
-    'hablar con (alguien|una persona|un humano|un asesor|un agente|un vendedor|el staff|el equipo|un encargado|un humano)',
-    'comunicar(me|se) con (alguien|una persona|un asesor|un humano|el staff|el equipo)',
-    'quiero (una|a una) persona', 'persona real', 'un humano', 'ser humano',
-    'no eres (una )?persona', 'no quiero (hablar con )?(un )?bot', 'atenci[oó]n humana', 'alguien del (equipo|staff|taller)',
-    '\\b(asesor|agente|representante|encargado|gerente)\\b',
-    // English
-    'talk (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
-    'speak (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
-    'real person', 'human being', 'a human', 'not a bot', '\\boperator\\b', '\\brepresentative\\b',
-  ].join('|'),
-  'i'
-);
+const HUMAN_REQUEST_ES = [
+  'hablar con (alguien|una persona|un humano|un asesor|un agente|un vendedor|el staff|el equipo|un encargado|un humano)',
+  'comunicar(me|se) con (alguien|una persona|un asesor|un humano|el staff|el equipo)',
+  'quiero (una|a una) persona', 'persona real', 'un humano', 'ser humano',
+  'no eres (una )?persona', 'no quiero (hablar con )?(un )?bot', 'atenci[oó]n humana', 'alguien del (equipo|staff|taller)',
+  '\\b(asesor|agente|representante|encargado|gerente)\\b',
+];
+const HUMAN_REQUEST_EN = [
+  'talk (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
+  'speak (to|with) (someone|a person|a human|a real person|an agent|staff|the team)',
+  'real person', 'human being', 'a human', 'not a bot', '\\boperator\\b', '\\brepresentative\\b',
+];
+const HUMAN_REQUEST_RE = new RegExp([...HUMAN_REQUEST_ES, ...HUMAN_REQUEST_EN].join('|'), 'i');
+// Only the English phrases. Decides which handoff sentence to send; Spanish
+// is the default when nothing English matched.
+const HUMAN_REQUEST_EN_RE = new RegExp(HUMAN_REQUEST_EN.join('|'), 'i');
 
 // The model was told to end every handoff with one of these sentences. If it
 // wrote the sentence but dropped the [ESCALAR] tag, treat it as escalated
@@ -127,6 +181,15 @@ async function processInbound(msg, contact) {
     return;
   }
 
+  // A reaction is an emoji stuck on an earlier message, not a question. Ignore
+  // it completely — no reply, no escalation, no thread state touched. Without
+  // this it fell through to the non-text branch below and both answered the
+  // customer and muted the bot.
+  if (msg.type === 'reaction') {
+    console.log(`[handler] reaction from ${from} — ignoring`);
+    return;
+  }
+
   if (alreadyHandled(msg.id)) return;
 
   // A human is handling this thread — stay quiet, but only for the escalation
@@ -150,10 +213,16 @@ async function processInbound(msg, contact) {
   if (kind === 'handoff') console.log(`[handler] ${from} asked for a human`);
 
   // EVERY kind of reply, on every message, waits out REPLY_DELAY_MS so a
-  // human can take the conversation first.
+  // human can take the conversation first — except outside shop hours, when
+  // no human is coming and the customer gets the answer at once.
   if (REPLY_DELAY_MS > 0) {
-    hold(from, kind, userText, msg.id);
-    return;
+    const hour = currentHourMx();
+    if (isInstantHour(hour)) {
+      console.log(`[handler] ${hour}:xx ${TZ} is outside shop hours — replying to ${from} immediately`);
+    } else {
+      hold(from, kind, userText, msg.id);
+      return;
+    }
   }
 
   await respond(from, kind, userText === null ? [] : [userText], msg.id);
@@ -195,45 +264,64 @@ async function deliverHeld(from) {
   await respond(from, job.kind, job.texts, job.msgId);
 }
 
-const MEDIA_REPLY = 'Gracias por tu mensaje. Con gusto un miembro del equipo lo revisa y te responde en un momentito.';
+// Sin diminutivos: era "en un momentito".
+const MEDIA_REPLY = 'Gracias por tu mensaje. Con gusto un miembro del equipo lo revisa y te responde en un momento.';
+
+const INTRODUCTION = 'Hola soy GiLiMo 👋🏼, tu asistente virtual de WhatsApp 🤖.';
+
+// Every reply path uses this, including handoffs and failures. The per-number
+// queue prevents concurrent first replies; only a successful send consumes it.
+async function sendReply(from, reply) {
+  const firstReply = !(await hasIntroduced(from));
+  const body = firstReply ? `${INTRODUCTION}\n\n${reply}` : reply;
+  await sendText(from, body);
+  if (firstReply) await markIntroduced(from);
+  return body;
+}
 
 // Shared by the immediate and held paths.
 async function respond(from, kind, texts, msgId) {
   if (kind === 'media') {
-    await sendText(from, MEDIA_REPLY);
+    await sendReply(from, MEDIA_REPLY);
     await setEscalated(from, true);
     console.log(`[handler] non-text message from ${from} — handed to staff, muted for ${ESCALATION_WINDOW_MS}ms`);
     return;
   }
-  await generateAndSend(from, texts.join('\n'), msgId, { handoff: kind === 'handoff' });
+  const userText = texts.join('\n');
+  if (kind === 'handoff') {
+    // Deterministic: the customer asked for a person, so promise one and go
+    // quiet. No model call, so an API outage cannot turn this into an apology.
+    const reply = HUMAN_REQUEST_EN_RE.test(userText) ? HANDOFF_REPLY_EN : HANDOFF_REPLY_ES;
+    await sendTyping(msgId).catch(() => {});
+    const sentReply = await sendReply(from, reply);
+    await appendTurn(from, userText, sentReply);
+    await setEscalated(from, true);
+    console.log(`[handler] escalated ${from} (customer asked for a human) — muted for ${ESCALATION_WINDOW_MS}ms`);
+    return;
+  }
+  await generateAndSend(from, userText, msgId);
 }
 
-// Appended to the system prompt when the customer explicitly asked for a person:
-// the model only phrases the handoff (in the customer's language); it does not
-// decide whether to hand off.
-const HANDOFF_INSTRUCTION = `
-
-## Instrucción para ESTE mensaje
-El cliente pidió hablar con una persona. NO respondas su duda ni hagas preguntas. Responde ÚNICAMENTE con una frase cálida y terminal avisando que en seguida un miembro del staff se pondrá en contacto (en el idioma del cliente), y termina con la etiqueta [ESCALAR].`;
-
-async function generateAndSend(from, userText, msgId, { handoff = false } = {}) {
+async function generateAndSend(from, userText, msgId) {
   try {
     await sendTyping(msgId).catch(() => {});
     const history = await getHistory(from);
     const res = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 500,
-      system: `${SYSTEM_PROMPT}\n\n## Fecha, hora y horario de HOY\n${scheduleContext()}${handoff ? HANDOFF_INSTRUCTION : ''}`,
+      system: `${SYSTEM_PROMPT}\n\n## Fecha, hora y horario de HOY\n${scheduleContext()}`,
       messages: [...history, { role: 'user', content: userText }],
     });
 
     let reply = res.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
-    // Escalate when: the customer asked for a person, the model tagged the
-    // reply, or the model promised a person without tagging. Any of the three
-    // means the bot must not answer the customer's next message.
-    const escalate = handoff || ESCALATE_TAG_RE.test(reply) || HANDOFF_PHRASE_RE.test(reply);
+    // Escalate when the model tagged the reply, promised a person without
+    // tagging, or produced nothing usable (the customer then gets the handoff
+    // text, so the bot must go quiet either way).
+    const tagged = ESCALATE_TAG_RE.test(reply);
     ESCALATE_TAG_RE.lastIndex = 0; // global regex: reset after .test()
-    reply = reply.replace(ESCALATE_TAG_RE, '').trim() || FALLBACK;
+    reply = reply.replace(ESCALATE_TAG_RE, '').trim();
+    const escalate = tagged || !reply || HANDOFF_PHRASE_RE.test(reply);
+    if (!reply) reply = FALLBACK;
 
     // Staff may have answered while the model was thinking. Their message
     // stands; the bot's reply is dropped rather than talking over them.
@@ -243,17 +331,33 @@ async function generateAndSend(from, userText, msgId, { handoff = false } = {}) 
       return;
     }
 
-    await sendText(from, reply);
-    await appendTurn(from, userText, reply);
+    const sentReply = await sendReply(from, reply);
+    await appendTurn(from, userText, sentReply);
     if (escalate) {
       await setEscalated(from, true);
-      console.log(`[handler] escalated ${from} (${handoff ? 'customer asked for a human' : 'bot could not answer'}) — muted for ${ESCALATION_WINDOW_MS}ms`);
+      console.log(`[handler] escalated ${from} (bot could not answer) — muted for ${ESCALATION_WINDOW_MS}ms`);
     }
   } catch (err) {
-    console.error('[handler] error', err);
-    await sendText(from, FALLBACK).catch(() => {});
+    logModelError(from, err);
+    // The customer never learns there was an error: they get the standard
+    // warm handoff and staff take the thread. If staff already answered while
+    // we were failing, say nothing at all.
+    const { escalated } = await getEscalation(from).catch(() => ({ escalated: false }));
+    if (!escalated) await sendReply(from, FALLBACK).catch(e => console.error('[handler] fallback send failed', from, e.message));
     await setEscalated(from, true).catch(() => {});
   }
+}
+
+// One line per failure, naming the cause, instead of the SDK's full error
+// object with every response header. Most specific class first.
+function logModelError(from, err) {
+  let cause = 'unknown';
+  if (err instanceof Anthropic.AuthenticationError) cause = 'auth: ANTHROPIC_API_KEY is invalid or revoked';
+  else if (err instanceof Anthropic.NotFoundError) cause = `not found: CLAUDE_MODEL "${MODEL}" may be wrong or retired`;
+  else if (err instanceof Anthropic.RateLimitError) cause = 'rate limited (429) after retries';
+  else if (err instanceof Anthropic.APIConnectionError) cause = 'network: could not reach the API after retries';
+  else if (err instanceof Anthropic.APIError) cause = `API ${err.status}`;
+  console.error(`[handler] model call failed for ${from} — ${cause} — ${err?.constructor?.name}: ${err?.message}`);
 }
 
 // Fields that might carry the message's origin. Logged only — see the note in

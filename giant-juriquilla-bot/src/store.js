@@ -31,8 +31,27 @@ export async function getHistory(waId) {
   const db = await load();
   const c = db[waId];
   if (!c) return [];
-  if (Date.now() - c.updatedAt > TTL_MS) { delete db[waId]; persist(); return []; }
+  if (Date.now() - c.updatedAt > TTL_MS) {
+    // Only the conversation expires. Keep the introduction flag for this number.
+    c.messages = [];
+    await persist();
+    return [];
+  }
   return c.messages;
+}
+
+export async function hasIntroduced(waId) {
+  const db = await load();
+  return Boolean(db[waId]?.introducedAt);
+}
+
+// Called only after WhatsApp accepts the first reply. This survives history
+// expiry, admin resets, and redeploys because it lives on the same volume.
+export async function markIntroduced(waId) {
+  const db = await load();
+  db[waId] = db[waId] ?? { messages: [], updatedAt: Date.now() };
+  db[waId].introducedAt = Date.now();
+  await persist();
 }
 
 export async function appendTurn(waId, userText, assistantText) {
@@ -45,8 +64,8 @@ export async function appendTurn(waId, userText, assistantText) {
   await persist();
 }
 
-// Wipes the stored turns for one number, keeping the record (and its escalated
-// flag) intact. Returns whether there was anything to clear.
+// Wipes the stored turns for one number, keeping escalation and introduction
+// state intact. Returns whether there was anything to clear.
 export async function clearHistory(waId) {
   const db = await load();
   const c = db[waId];
