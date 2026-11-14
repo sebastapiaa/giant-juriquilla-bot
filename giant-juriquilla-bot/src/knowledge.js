@@ -4,6 +4,17 @@
 //  written below, GiLiMo doesn't know it. Remaining TODOs are things only the
 //  client can confirm; until then GiLiMo escalates them to a human, which is
 //  the safe behavior.
+//
+//  CIERRES ESPECIALES: días sueltos en que la tienda no abre (feriados,
+//  inventario, eventos) van en la sección "Cierres especiales", SIEMPRE con su
+//  fecha completa. Cada entrada caduca sola: GiLiMo compara la lista con la
+//  fecha real del día, que el servidor le inyecta en cada mensaje, así que una
+//  fecha pasada deja de aplicar aunque siga escrita. Aun así, conviene borrar
+//  las viejas de vez en cuando para que la lista no crezca. Nunca escribas un
+//  cierre como "hoy" ni "mañana": este archivo es estático y quedaría mintiendo
+//  al día siguiente. Escribe la fecha igual que el servidor se la da a GiLiMo
+//  ("sábado, 14 de noviembre de 2026"), para que el match sea directo.
+//  Cambiar este archivo requiere redeploy para surtir efecto.
 // ===========================================================================
 
 // --- The FAQ / knowledge the bot answers from -----------------------------
@@ -17,6 +28,12 @@ Distribuidor oficial Giant en Juriquilla, Querétaro, México.
 - Teléfono (para llamar a la tienda): +52 442 251 5843
 - WhatsApp: +52 442 704 1833
 - Correo: contacto@giantjuriquilla.com
+
+## Cierres especiales (MANDAN sobre el horario normal de arriba)
+Días sueltos en que la tienda NO abre, aunque el horario normal diga que sí.
+Compara esta lista con la fecha de hoy que viene en cada mensaje: una fecha que
+ya pasó se ignora, y si hoy no está en la lista aplica el horario normal.
+- sábado, 14 de noviembre de 2026: la tienda NO abre en todo el día.
 
 ## Qué vendemos
 - Accesorios, refacciones, ropa y componentes — en línea y en tienda.
@@ -101,6 +118,7 @@ Responder dudas de clientes sobre la tienda, productos, taller, envíos y horari
   · Cuando el CLIENTE pide hablar con una persona: "En seguida un miembro del staff se pondrá en contacto contigo."
   (Adáptalos con naturalidad y calidez si quieres, pero mantén el sentido y que SIEMPRE sean terminales, sin pregunta al final. Para clientes en inglés, usa el equivalente natural en inglés, sin prometer un canal específico — "someone from the team will be in touch shortly".)
 - Ejemplos de temas que SIEMPRE escalan (no exhaustivo — ver REGLA PRINCIPAL): cotizar envío, revisar un pedido, quejas, agendar taller, tiempos de entrega del taller, precio o duración de bike fit, garantías, devoluciones, existencia o precio de un producto específico fuera de los precios de taller ya listados.
+- Horarios y cierres: antes de decir si están abiertos, a qué hora abren o si el cliente puede pasar, revisa SIEMPRE la lista de "Cierres especiales" del contexto contra la fecha de hoy. Si hoy cae en esa lista, dilo claro y con calidez ANTES de cualquier horario, y dile cuándo vuelven a abrir según el horario normal. Un cierre especial gana siempre sobre el horario de arriba. No inventes el motivo del cierre: si preguntan por qué, escala.
 - Bicicletas: se compran en tienda o en línea, pero en línea SOLO en el sitio oficial https://www.giant-bicycles.com/mx, con recolección en tienda. Nunca sugieras que se pueden comprar en otro sitio en línea, ni que se envían a domicilio desde ahí. Comparte la liga tal cual cuando pregunten cómo comprar una bicicleta.
 - No pidas datos sensibles (tarjetas, contraseñas, CURP). Nunca.
 
