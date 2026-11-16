@@ -52,6 +52,19 @@ since no staff member is going to answer first. By default that is 8pm to
 wrap midnight; set both to the same value to disable). Escalation rules are
 unchanged: a thread staff replied to stays muted either way.
 
+## Dates, hours and holidays
+The bot never works out the date itself. On every message `src/hours.js`
+computes, in `TIMEZONE`, today's weekday, whether the shop is open right now,
+today's closing time, tomorrow's hours and the next opening, and injects those
+sentences into the prompt. Hours live in the `HOURS` table there; the FAQ's
+"Horario" line is generated from it.
+
+**Holidays**: Mexico's statutory holidays (1 Jan, first Monday of Feb, third
+Monday of Mar, 1 May, 16 Sep, third Monday of Nov, 25 Dec) are built in and
+computed for any year — the bot says the shop is closed and names the next
+opening. Any other closure goes in `CLOSED_DATES` in Railway as comma-separated
+`YYYY-MM-DD` (e.g. `2026-12-24,2026-12-31`); changing it redeploys, no code edit.
+
 ## Edit this
 - `src/knowledge.js` — the system prompt + FAQ. THE file you change. Fill every TODO.
 

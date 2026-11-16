@@ -16,6 +16,39 @@ export const HOURS = {
   6: { open: '09:00', close: '17:00' },
 };
 
+// Days the shop is closed regardless of weekday.
+//
+// Built in: Mexico's statutory holidays (Ley Federal del Trabajo, art. 74),
+// including the Monday-observed ones, computed for any year. Extra closures
+// (inventario, puente, vacaciones) go in CLOSED_DATES in Railway as a
+// comma-separated list of YYYY-MM-DD — no code change, just a redeploy.
+const CLOSED_DATES = new Set(
+  (process.env.CLOSED_DATES || '').split(',').map(s => s.trim()).filter(s => /^\d{4}-\d{2}-\d{2}$/.test(s))
+);
+
+// Day-of-month of the n-th given weekday (0=domingo…6=sábado) in year/month (1-12).
+function nthWeekday(year, month, weekday, n) {
+  const firstDow = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+  return 1 + ((weekday - firstDow + 7) % 7) + (n - 1) * 7;
+}
+
+export function holidayName({ year, month, day }, extraClosed = CLOSED_DATES) {
+  if (month === 1 && day === 1) return 'Año Nuevo';
+  if (month === 2 && day === nthWeekday(year, 2, 1, 1)) return 'Día de la Constitución';
+  if (month === 3 && day === nthWeekday(year, 3, 1, 3)) return 'Natalicio de Benito Juárez';
+  if (month === 5 && day === 1) return 'Día del Trabajo';
+  if (month === 9 && day === 16) return 'Día de la Independencia';
+  if (month === 11 && day === nthWeekday(year, 11, 1, 3)) return 'Día de la Revolución';
+  if (month === 12 && day === 25) return 'Navidad';
+  const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  return extraClosed.has(iso) ? 'cierre programado' : null;
+}
+
+// Hours for a given local date: the weekday's hours, or null on a holiday.
+export function hoursFor(parts, extraClosed = CLOSED_DATES) {
+  return holidayName(parts, extraClosed) ? null : HOURS[parts.weekday];
+}
+
 const DAYS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
 const DAY_INDEX = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
 
@@ -81,15 +114,19 @@ function dayLabel(date) {
 // The block injected into the system prompt. Everything the model needs to
 // answer "¿están abiertos?", "¿a qué hora cierran?", "¿mañana abren?" is
 // stated outright, so it has nothing to compute.
-export function scheduleContext(now = new Date()) {
+export function scheduleContext(now = new Date(), extraClosed = CLOSED_DATES) {
   const today = localParts(now);
   const tomorrowDate = new Date(now.getTime() + 24 * 3_600_000);
-  const h = HOURS[today.weekday];
-  const hT = HOURS[localParts(tomorrowDate).weekday];
+  const tomorrow = localParts(tomorrowDate);
+  const holiday = holidayName(today, extraClosed);
+  const holidayT = holidayName(tomorrow, extraClosed);
+  const h = hoursFor(today, extraClosed);
+  const hT = hoursFor(tomorrow, extraClosed);
   const nowTime = new Intl.DateTimeFormat('es-MX', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: true }).format(now);
 
   let status;
-  if (!h) status = `CERRADA todo el día (los ${DAYS[today.weekday]}s no abrimos).`;
+  if (holiday) status = `CERRADA todo el día: hoy es día festivo (${holiday}) y no abrimos.`;
+  else if (!h) status = `CERRADA todo el día (los ${DAYS[today.weekday]}s no abrimos).`;
   else if (today.minutes < minutes(h.open)) status = `CERRADA todavía; hoy abrimos a las ${fmt12(h.open)} y cerramos a las ${fmt12(h.close)}.`;
   else if (today.minutes < minutes(h.close)) status = `ABIERTA; hoy cerramos a las ${fmt12(h.close)}.`;
   else status = `CERRADA ya por hoy (hoy cerramos a las ${fmt12(h.close)}).`;
@@ -99,7 +136,7 @@ export function scheduleContext(now = new Date()) {
   for (let i = 0; i < 8 && !next; i++) {
     const d = new Date(now.getTime() + i * 24 * 3_600_000);
     const p = localParts(d);
-    const hh = HOURS[p.weekday];
+    const hh = hoursFor(p, extraClosed);
     if (!hh) continue;
     if (i === 0 && today.minutes >= minutes(hh.open)) continue;
     next = `${i === 0 ? 'hoy' : i === 1 ? 'mañana' : 'el'} ${dayLabel(d)} a las ${fmt12(hh.open)}`;
@@ -108,9 +145,9 @@ export function scheduleContext(now = new Date()) {
   return [
     `Fecha y hora actual en Juriquilla, Querétaro: ${longDate(now)}, ${nowTime}`,
     `Hoy es ${DAYS[today.weekday]}. La tienda está ${status}`,
-    `Mañana (${dayLabel(tomorrowDate)}): ${hT ? `abrimos ${fmt12(hT.open)} – ${fmt12(hT.close)}` : 'cerrado'}.`,
+    `Mañana (${dayLabel(tomorrowDate)}): ${hT ? `abrimos ${fmt12(hT.open)} – ${fmt12(hT.close)}` : holidayT ? `cerrado, es día festivo (${holidayT})` : 'cerrado'}.`,
     `Próxima apertura: ${next}.`,
-    `Horario general: ${hoursSummary()}.`,
+    `Horario general: ${hoursSummary()}. Cerramos en días festivos oficiales.`,
     `Usa SIEMPRE estos datos tal cual para cualquier pregunta sobre fecha, día, hora, si estamos abiertos o a qué hora abrimos/cerramos. NO calcules el día de la semana ni el horario tú mismo. Los mensajes anteriores de esta conversación pueden ser de otro día: ignora cualquier fecha, día u horario mencionado antes y usa solo lo de arriba.`,
   ].join('\n');
 }
